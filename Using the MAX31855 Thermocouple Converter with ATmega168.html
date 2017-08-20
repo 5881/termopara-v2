@@ -1,0 +1,314 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<!-- saved from url=(0046)https://www.seanet.com/~karllunt/max31855.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  
+  <title>Using
+the MAX31855 Thermocouple Converter with ATmega168</title>
+<style type="text/css"></style></head>
+<body style="color: rgb(0, 0, 0); background-color: rgb(238, 255, 255);" vlink="#551a8b" alink="#ee0000" link="#0000ee">
+<div style="text-align: center;"><big style="font-weight: bold;"><big>Using
+the
+MAX31855
+Thermocouple Converter with ATmega168</big><br>
+(Last
+updated 1 Jan 2013)<br>
+</big>
+<br>
+<br>
+</div>
+I needed a wide-range A/D for an oven PID controller I was
+making.&nbsp; I chose the MAX31855 thermocouple converter and matching
+K-type thermocouple.&nbsp; I purchased both devices from <a href="http://www.adafruit.com/">Adafruit</a>.&nbsp; But I found issues
+with
+the code samples provided by Adafruit on their git repository and ended
+up rolling my own.<br>
+<br>
+For the record, the issues I had with their code were:<br>
+1.&nbsp; Bit-banged SPI rather than hardware SPI.<br>
+2.&nbsp; The bit-banged SPI was really slow, as in a 500 Hz SPI clock,
+when the 31855 device can run MUCH faster<br>
+3.&nbsp; The conversion code used floating point operations.&nbsp; This
+is probably good for most applications, but I knew my app only needed
+integer math and I didn't want to drag in the extra 4K of code to
+support float operations that were only going to be done as an
+intermediate step.<br>
+4.&nbsp; The code was wrong for negative raw values from the
+MAX31855.&nbsp; I wasn't expecting to see negative values in my oven
+temperature controller, but that error still needed fixing.<br>
+5.&nbsp; The code was written in C++, as it was presented as an Arduino
+sketch.&nbsp; Sorry, not interested.<br>
+<br>
+<span style="font-weight: bold;">Revised 1 Jan 2013</span><br>
+It is possible that item 4 above is actually compiler-dependent.&nbsp;
+The gcc-avr compiler does not sign-extend on right-shift, but perhaps
+the Arduino compiler does.&nbsp; I don't use Arduino so can't test.<br>
+<br>
+<span style="font-weight: bold;">The updated MAX31855 code<br>
+<span style="font-weight: bold;"></span></span>Here is my updated code<span style="font-weight: bold;"><span style="font-weight: bold;"></span>.&nbsp;
+</span>Note that this is NOT a finished program and will not
+compile.&nbsp; This is a set of subroutines that you can drop into your
+project, adjust the SPI literals as needed, and talk to the MAX31855
+via SPI.&nbsp; In my implementation, this code compiles using the
+WinAVR gcc tool suite (WinAVR-20100110) and runs on an ATmega168
+using a 20 MHz crystal.<br>
+<br>
+<span style="font-family: monospace;">=============================================================================<br>
+/*<br>
+&nbsp;*&nbsp; Define literals for the SPI port accesses and the
+thermocouple chip<br>
+&nbsp;*&nbsp; select line.<br>
+&nbsp;*/<br>
+#define&nbsp; PORT_THERMO_CS&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp; PORTD<br>
+#define&nbsp; DDR_THERMO_CS&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; DDRD<br>
+#define&nbsp; BIT_THERMO_CS&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; 7<br>
+#define&nbsp; MASK_THERMO_CS&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp; (1&lt;&lt;BIT_THERMO_CS)<br>
+<br>
+#define&nbsp; PORT_SPI&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; PORTB<br>
+#define&nbsp; DDR_SPI&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; DDRB<br>
+#define&nbsp; BIT_SPI_SCK&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 5<br>
+#define&nbsp; MASK_SPI_SCK&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp;&nbsp; (1&lt;&lt;BIT_SPI_SCK)<br>
+#define&nbsp; BIT_SPI_SS&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp; 2<br>
+#define&nbsp; MASK_SPI_SS&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (1&lt;&lt;BIT_SPI_SS)<br>
+#define&nbsp; BIT_SPI_MISO&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp;&nbsp; 4<br>
+#define&nbsp; MASK_SPI_MISO&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; (1&lt;&lt;BIT_SPI_MISO)<br>
+<br>
+<br>
+<br>
+<br>
+/*<br>
+&nbsp;*&nbsp; ThermoInit&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; set up hardware
+for using the MAX31855<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; This routine configures the SPI as a master for exchanging<br>
+&nbsp;*&nbsp; data with the MAX31855 thermocouple converter.&nbsp; All
+pins<br>
+&nbsp;*&nbsp; and registers for accessing the various port lines are<br>
+&nbsp;*&nbsp; defined at the top of this code as named literals.<br>
+&nbsp;*/<br>
+static void&nbsp; ThermoInit(void)<br>
+{<br>
+&nbsp;&nbsp;&nbsp; PORT_THERMO_CS |= MASK_THERMO_CS;&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; // start with CS high<br>
+&nbsp;&nbsp;&nbsp; DDR_THERMO_CS |= MASK_THERMO_CS;&nbsp;&nbsp;&nbsp;
+&nbsp; &nbsp;&nbsp; // now make that line an output<br>
+<br>
+&nbsp;&nbsp;&nbsp; PORT_SPI |= MASK_SPI_SS;&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp; &nbsp; // SS* is not
+used but must be driven high<br>
+&nbsp;&nbsp;&nbsp; DDR_SPI |= MASK_SPI_SS;&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp; // SS*
+is not used but must be driven high<br>
+&nbsp;&nbsp;&nbsp; PORT_SPI &amp;= ~MASK_SPI_SCK;&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp; // drive SCK low<br>
+&nbsp;&nbsp;&nbsp; DDR_SPI |= MASK_SPI_SCK;&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; // now
+make SCK an output<br>
+<br>
+&nbsp;&nbsp;&nbsp; SPCR = (1&lt;&lt;SPE) | (1&lt;&lt;MSTR) |
+(1&lt;&lt;SPR0) | (1&lt;&lt;SPR1) | (1&lt;&lt;CPHA);<br>
+&nbsp;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; // enable SPI as master, slowest
+clock,<br>
+&nbsp;&nbsp; &nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; // data active on trailing edge
+of SCK<br>
+}<br>
+<br>
+<br>
+/*<br>
+&nbsp;*&nbsp; ThermoReadRaw&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return 32-bit
+raw value from MAX31855<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; This routine uses a four-byte SPI exchange to collect a<br>
+&nbsp;*&nbsp; raw reading from the MAX31855 thermocouple
+converter.&nbsp; That<br>
+&nbsp;*&nbsp; value is returned unprocessed to the calling routine.<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; Note that this routine does NO processing.&nbsp; It does
+not<br>
+&nbsp;*&nbsp; check for error flags or reasonable data ranges.<br>
+&nbsp;*/<br>
+static int32_t&nbsp; ThermoReadRaw(void)<br>
+{<br>
+&nbsp;&nbsp;&nbsp; int32_t&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp; d;<br>
+&nbsp;&nbsp;&nbsp; unsigned char&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; n;<br>
+<br>
+&nbsp;&nbsp;&nbsp; PORT_THERMO_CS &amp;=
+~MASK_THERMO_CS;&nbsp;&nbsp;&nbsp; // pull thermo CS low<br>
+&nbsp;&nbsp;&nbsp; d = 0;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; // start with
+nothing<br>
+&nbsp;&nbsp;&nbsp; for (n=3; n!=0xff; n--)<br>
+&nbsp;&nbsp;&nbsp; {<br>
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; SPDR = 0;&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; // send a null byte<br>
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; while ((SPSR &amp;
+(1&lt;&lt;SPIF)) == 0)&nbsp; ;&nbsp;&nbsp;&nbsp; // wait until transfer
+ends<br>
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; d = (d&lt;&lt;8) +
+SPDR;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; // add next byte, starting with MSB<br>
+&nbsp;&nbsp;&nbsp; }<br>
+&nbsp;&nbsp;&nbsp; PORT_THERMO_CS |=
+MASK_THERMO_CS;&nbsp;&nbsp;&nbsp;&nbsp; // done, pull CS high<br>
+<br>
+/*<br>
+&nbsp;*&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+Test
+cases<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; Uncomment one of the following lines of code to return
+known values<br>
+&nbsp;*&nbsp; for later processing.<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; Test values are derived from information in Maxim's
+MAX31855 data sheet,<br>
+&nbsp;*&nbsp; page 10 (19-5793 Rev 2, 2/12).<br>
+&nbsp;*/<br>
+//&nbsp; d = 0x01900000;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; // thermocouple = +25C, reference = 0C, no faults<br>
+//&nbsp; d = 0xfff00000;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; // thermocouple = -1C, reference = 0C, no faults<br>
+//&nbsp; d = 0xf0600000;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; // thermocouple = -250C, reference = 0C, no faults<br>
+//&nbsp; d = 0x00010001;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; // thermocouple = N/A, reference = N/A, open fault<br>
+//&nbsp; d = 0x00010002;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; // thermocouple = N/A, reference = N/A, short to GND<br>
+//&nbsp; d = 0x00010004;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; // thermocouple = N/A, refernece = N/A, short to VCC<br>
+<br>
+&nbsp;&nbsp;&nbsp; return&nbsp; d;<br>
+}<br>
+<br>
+<br>
+/*<br>
+&nbsp;*&nbsp; ThermoReadC&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return
+thermocouple temperature in degrees C<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; This routine takes a raw reading from the thermocouple
+converter<br>
+&nbsp;*&nbsp; and translates that value into a temperature in degrees
+C.&nbsp; That<br>
+&nbsp;*&nbsp; value is returned to the calling routine as an integer
+value,<br>
+&nbsp;*&nbsp; rounded.<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; The thermocouple value is stored in bits 31-18 as a
+signed 14-bit<br>
+&nbsp;*&nbsp; value, where the LSB represents 0.25 degC.&nbsp; To
+convert to an<br>
+&nbsp;*&nbsp; integer value with no intermediate float operations, this
+code<br>
+&nbsp;*&nbsp; shifts the value 20 places right, rather than 18,
+effectively<br>
+&nbsp;*&nbsp; dividing the raw value by 4 and scaling it to unit
+degrees.<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; Note that this routine does NOT check the error flags in
+the<br>
+&nbsp;*&nbsp; raw value.&nbsp; This would be a nice thing to add later,
+when I've<br>
+&nbsp;*&nbsp; figured out how I want to propagate the error
+conditions...<br>
+&nbsp;*/<br>
+static int&nbsp; ThermoReadC(void)<br>
+{<br>
+&nbsp;&nbsp;&nbsp; char&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; neg;<br>
+&nbsp;&nbsp;&nbsp; int32_t&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; d;<br>
+<br>
+&nbsp;&nbsp;&nbsp; neg = FALSE;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; // assume a positive raw value<br>
+&nbsp;&nbsp;&nbsp; d = ThermoReadRaw();&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; // get a raw value<br>
+&nbsp;&nbsp;&nbsp; d = ((d &gt;&gt; 18) &amp; 0x3fff);&nbsp;&nbsp; //
+leave only thermocouple value in d<br>
+&nbsp;&nbsp;&nbsp; if (d &amp; 0x2000)&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; // if thermocouple reading
+is negative...<br>
+&nbsp;&nbsp;&nbsp; {<br>
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; d = -d &amp;
+0x3fff;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; // always work with
+positive values<br>
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; neg = TRUE;&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; // but note original value
+was negative<br>
+&nbsp;&nbsp;&nbsp; }<br>
+&nbsp;&nbsp;&nbsp; d = d + 2;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp; // round up by 0.5 degC (2
+LSBs)<br>
+&nbsp;&nbsp;&nbsp; d = d &gt;&gt; 2;&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;&nbsp; // now
+convert from 0.25 degC units to degC<br>
+&nbsp;&nbsp;&nbsp; if (neg)&nbsp; d = -d;&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp; // convert to negative if needed<br>
+&nbsp;&nbsp;&nbsp; return&nbsp; d;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp; // return as integer<br>
+}<br>
+<br>
+<br>
+/*<br>
+&nbsp;*&nbsp; ThermoReadF&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; return
+thermocouple temperature in degrees F<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; This routine takes a reading from the thermocouple
+converter in<br>
+&nbsp;*&nbsp; degC and converts it to degF.<br>
+&nbsp;*<br>
+&nbsp;*&nbsp; Note that this routine simply calls ThermoReadC and
+converts<br>
+&nbsp;*&nbsp; from degC to degF using integer math.&nbsp; This routine
+does not<br>
+&nbsp;*&nbsp; see the raw converter value and cannot do any error
+checking.<br>
+&nbsp;*/<br>
+static int&nbsp; ThermoReadF(void)<br>
+{<br>
+&nbsp;&nbsp;&nbsp; int&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp; t;<br>
+<br>
+&nbsp;&nbsp;&nbsp; t = ThermoReadC();&nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp; // get the value in degC<br>
+&nbsp;&nbsp;&nbsp; t = ((t * 90) / 50) + 32;&nbsp;&nbsp;&nbsp; //
+convert to degF<br>
+&nbsp;&nbsp;&nbsp; return&nbsp; t;&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp;
+&nbsp;&nbsp;&nbsp; &nbsp;&nbsp;&nbsp; &nbsp;&nbsp; // all done<br>
+}<br>
+<br style="font-family: monospace;">
+<br style="font-family: monospace;">
+<br style="font-family: monospace;">
+<span style="font-family: monospace;">=====================================================================</span><br style="font-family: monospace;">
+<br style="font-family: monospace;">
+<br>
+</span><br>
+<br>
+<a href="https://www.seanet.com/~karllunt/index.html">Home<br>
+</a><br>
+<br>
+
+
+<div></div></body></html>
